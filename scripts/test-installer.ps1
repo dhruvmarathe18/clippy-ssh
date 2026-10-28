@@ -89,4 +89,7 @@ for ($i=0; $i -lt $profiles.Count; $i++) {
 }
 if ((Get-ItemPropertyValue -LiteralPath $runKey -Name ClippyInstallerTestNeighbor) -ne 'preserve me') { throw 'Uninstall changed another startup entry' }
 Remove-ItemProperty -LiteralPath $runKey -Name ClippyInstallerTestNeighbor
+# The intentional failed-payload test leaves LASTEXITCODE=1. GitHub's PowerShell
+# wrapper propagates it unless we explicitly mark the completed test successful.
+$global:LASTEXITCODE = 0
 Write-Output 'Installer lifecycle passed: restriction handling, fresh install, profile loading, repeat install, rollback, startup, background IPC, uninstall, and policy restoration.'
