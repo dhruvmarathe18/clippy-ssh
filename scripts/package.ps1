@@ -13,10 +13,26 @@ foreach ($clippyArch in @('x86_64', 'aarch64')) {
     if ($LASTEXITCODE -ne 0) { throw "Agent build failed: $clippyTarget" }
     Copy-Item -LiteralPath "target\$clippyTarget\release\clippy-agent" -Destination "dist\agents\clippy-agent-linux-$clippyArch"
 }
-cargo build --locked --release --bin clippy --bin clippy-background
-if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
-Copy-Item -LiteralPath target\release\clippy.exe -Destination dist\package\clippy.exe
-Copy-Item -LiteralPath target\release\clippy-background.exe -Destination dist\package\clippy-background.exe
+$clippyWindowsOutput = 'target\release'
+if ($clippyHost -eq 'x86_64-pc-windows-msvc') {
+    # An explicit target keeps host proc-macro builds separate from CRT flags.
+    # End users must not need to install a Visual C++ redistributable.
+    $clippyPreviousFlags = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
+    try {
+        $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = "$clippyPreviousFlags -C target-feature=+crt-static".Trim()
+        cargo build --locked --release --bin clippy --bin clippy-background --target $clippyHost
+        if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
+    } finally {
+        $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = $clippyPreviousFlags
+    }
+    $clippyWindowsOutput = "target\$clippyHost\release"
+} else {
+    cargo build --locked --release --bin clippy --bin clippy-background
+    if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
+}
+Copy-Item -LiteralPath "$clippyWindowsOutput\clippy.exe" -Destination dist\package\clippy.exe
+Copy-Item -LiteralPath "$clippyWindowsOutput\clippy-background.exe" -Destination dist\package\clippy-background.exe
+& .\scripts\check-runtime.ps1 -Files @('dist\package\clippy.exe', 'dist\package\clippy-background.exe')
 Copy-Item -LiteralPath README.md,LICENSE,CONTRIBUTING.md,SECURITY.md -Destination dist\package
 Copy-Item -LiteralPath docs\validation.md,docs\roadmap.md,docs\architecture.md -Destination dist\package\docs
 Compress-Archive -Path dist\package\* -DestinationPath dist\clippy-windows-x64.zip -Force
