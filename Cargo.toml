@@ -1,0 +1,45 @@
+[package]
+name = "clippy-ssh"
+version = "0.2.1"
+edition = "2024"
+rust-version = "1.85"
+description = "Native clipboard files and images over SSH"
+license = "MIT"
+repository = "https://github.com/dhruvmarathe18/clippy-ssh"
+readme = "README.md"
+keywords = ["ssh", "clipboard", "windows", "file-transfer"]
+categories = ["command-line-utilities", "network-programming"]
+
+[[bin]]
+name = "clippy"
+path = "src/main.rs"
+
+[[bin]]
+name = "clippy-agent"
+path = "src/bin/agent.rs"
+
+[dependencies]
+anyhow = "1"
+bincode = "1.3"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+portable-pty = "0.9"
+
+[target.'cfg(windows)'.dependencies]
+arboard = "3"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_UI_Accessibility", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = true
