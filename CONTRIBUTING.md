@@ -22,6 +22,10 @@ The live SSH tests skip unless `CLIPPY_TEST_SSH_ARGS` is set. CI runs the ordina
 
 To build the Windows package, run `./scripts/package.ps1` from PowerShell. It builds the Linux x86_64 and arm64 helpers, embeds them in the Windows client, and writes `dist/clippy-windows-x64.zip`.
 
+`./scripts/build-installer.ps1` builds that package plus `Clippy-Setup-VERSION-x64.exe` and checksums. Use `-SkipPackage` only after packaging the current source. The compiler bootstrap is pinned to Inno Setup 7.1.1 and verifies the downloaded compiler installer before execution. See `installer/clippy.iss` for the installer UI and lifecycle hooks.
+
+The **Release Windows installer** GitHub workflow runs Windows/Linux tests, builds the package, and runs `scripts/test-installer.ps1` on a disposable hosted Windows runner. That lifecycle test intentionally changes the runner's profiles and execution policy and refuses to run on a normal workstation. It checks explicit-policy rejection, default policy enablement, repeat installation, rollback, and uninstall preservation. Update the package version and `docs/releases/vVERSION.md`, then dispatch the workflow with that exact tag to publish a prerelease.
+
 For a Linux helper built directly on Linux:
 
 ```sh

@@ -15,6 +15,7 @@ These are directions for contribution, not claims that every SSH client already 
 - A Windows background app with a tray menu, pause/resume, and sign-in startup.
 - Logon-restricted local session registration, peer process checks, and focus heartbeats.
 - Reversible PowerShell integration for supported interactive `ssh` connections in Windows Terminal, with native passthrough for other invocations.
+- A single per-user Windows EXE installer with startup, uninstall, configuration rollback, and bundled helpers.
 
 ## Automatic connections: expand coverage
 
@@ -44,7 +45,7 @@ Nested SSH, containers, tmux after a user switch, custom tmux sockets, and addit
 ## Reliability and distribution
 
 - More installer rollback/upgrade coverage and fewer authentication round trips for remote helper setup.
-- Repeatable release builds and downloadable packages.
+- Code signing and broader installer compatibility testing.
 - Broader manual compatibility results and live arm64 testing.
 - Recovery from interrupted transfers and clearer failure diagnostics.
 - Directory transfer and virtual clipboard formats after their semantics are defined.

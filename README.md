@@ -11,7 +11,7 @@ Clippy is a Rust client and Linux helper. It uses your installed Windows OpenSSH
 
 ## Status and direction
 
-This is an early working prototype, version **0.3.0**. A background Windows app handles paste shortcuts, and one-time PowerShell integration enables clipboard transfer when you use your normal `ssh` command in Windows Terminal. Normal text paste keeps the terminal's existing behavior.
+This is an early working prototype, version **0.3.1**. A single Windows installer sets up the background app and PowerShell integration, enabling clipboard transfer when you use your normal `ssh` command in Windows Terminal. Normal text paste keeps the terminal's existing behavior.
 
 The goal is to make clipboard transfer feel native across terminal clients. Windows Terminal with PowerShell is the first integration; VS Code, WSL, PuTTY, and other clients remain planned. See the [roadmap](docs/roadmap.md) and [contribution guide](CONTRIBUTING.md) to help build them.
 
@@ -27,11 +27,11 @@ The image is already on the server. The command remains editable until you press
 
 ## Use
 
-Build the [Windows package](#build), extract `dist/clippy-windows-x64.zip`, and run once from the extracted folder:
+**[Download the Windows installer](https://github.com/dhruvmarathe18/clippy-ssh/releases/download/v0.3.1/Clippy-Setup-0.3.1-x64.exe)** · [Release notes and checksums](https://github.com/dhruvmarathe18/clippy-ssh/releases/tag/v0.3.1)
 
-```powershell
-.\clippy.exe install
-```
+Run **Clippy-Setup-0.3.1-x64.exe** and choose Install. It bundles the client, background app, and Linux helpers, configures your account, and starts Clippy. No Rust installation, ZIP extraction, administrator access, or manual setup command is needed. Windows Terminal and Windows OpenSSH Client are prerequisites.
+
+This preview installer is unsigned, so Windows may show an unknown-publisher or SmartScreen warning. Release assets include SHA-256 checksums.
 
 Open a **new PowerShell tab in Windows Terminal**, then connect normally:
 
@@ -76,11 +76,13 @@ Stopping the background app disables rich paste without terminating SSH connecti
 
 The PowerShell integration handles supported interactive shell connections only. Remote commands, tunnels, redirected input/output, unsupported options, and unsupported effective SSH configuration go through native OpenSSH. Other terminal clients also stay native. Use `ssh.exe ...` explicitly, or set `$env:CLIPPY_DISABLE = '1'`, to bypass integration. Clear that variable to re-enable it.
 
-Install adds marked blocks to the current user's Windows PowerShell and PowerShell all-host profiles, a generated script under `%LOCALAPPDATA%\Clippy`, and an `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\ClippySSH` startup value. It backs up existing profiles before changes and preserves existing functions/aliases named `ssh` or `clippy`. It does not change PowerShell execution policy. Profiles must be allowed by your existing policy.
+Install adds marked blocks to the current user's Windows PowerShell and PowerShell all-host profiles, a generated script under `%LOCALAPPDATA%\Clippy`, and an `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\ClippySSH` startup value. It backs up existing profiles before changes and preserves existing functions/aliases named `ssh` or `clippy`. If no PowerShell policy is configured, Setup enables locally created profiles using `RemoteSigned` for the current user. Explicit restrictions and organization policies are preserved; incompatible policies stop Setup with an explanation. Failed configuration is rolled back.
 
-Run `clippy uninstall` to remove the managed profile blocks and startup entry. Open new tabs to reload profiles. Existing SSH sessions, binary versions, and uploaded files are retained. Installation and upgrades do not replace running executables.
+Uninstall through **Windows Settings → Apps → Clippy SSH**. This removes the installer files, shortcuts, managed profile blocks, and startup entry. `clippy uninstall` removes just the shell/startup integration. A default policy changed by Setup is restored if its current-user value is still unchanged. Open new tabs to reload profiles. Existing SSH sessions, versioned binaries, and uploaded files are retained. Installation and upgrades do not replace running executables.
 
 For explicit use without shell/startup integration, keep both executables together and run `clippy setup ...` followed by `clippy ssh ...`. Already-running native SSH sessions cannot acquire file paste retroactively.
+
+The optional portable ZIP can also be extracted and installed using `clippy.exe install --enable-profiles`. `clippy.exe install --check --enable-profiles` checks prerequisites and policy without changing integration.
 
 ## Files and retention
 
@@ -133,6 +135,8 @@ cargo clippy --locked --all-targets -- -D warnings
 ```
 
 `package.ps1` builds both static Linux helpers, embeds them in the Windows client, builds the background app, and creates `dist/clippy-windows-x64.zip`. Keep `clippy.exe` and `clippy-background.exe` together. A development build without embedded helpers can install one using `clippy setup --agent PATH [SSH OPTIONS] HOST`.
+
+Run `./scripts/build-installer.ps1` to also produce the single-file EXE installer and `SHA256SUMS.txt`. The build script downloads a pinned Inno Setup compiler and verifies its SHA-256 and publisher signature. The application and helpers remain Rust; Inno Setup supplies the Windows installer/uninstaller. The GitHub release workflow tests the complete installer lifecycle on a disposable Windows runner before publishing a prerelease.
 
 Windows GNU builds use LLVM-MinGW (MSVCRT), including `ld.lld.exe` and `dlltool` on PATH. The GNU configuration links directly with Rust's bundled CRT to avoid mixing runtime startup objects. `scripts/env.ps1` supports the maintainer's optional workspace-local `.tools` layout; it is not required for a normal Rust installation. See [CONTRIBUTING.md](CONTRIBUTING.md) for platform-specific development notes.
 

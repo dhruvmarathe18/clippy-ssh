@@ -4,6 +4,10 @@ Run automated tests first. Record manual results rather than assuming that an SS
 
 ## Recorded results — 2026-10-29
 
+Version 0.3.1 adds a single-file Windows installer and a gated release workflow. Local Rust tests and static analysis pass. The release workflow must pass the fresh-install/repeat-install/rollback/uninstall tests before publishing assets; its run is linked from the release commit's GitHub Actions history. The package is unsigned.
+
+A production client receipt after the final 0.3.0 pipe fix records a successfully inserted file path under the switched Linux user's private home. This confirms that transfer/path insertion occurred in the installed client. It does not by itself verify every mouse/UI behavior in the manual checklist.
+
 Version 0.3.0 development checks:
 
 - 23 Windows unit tests passed, including profile encoding/preservation, native-routing decisions, stale/ambiguous focus rejection, session-registration cleanup, queued paste/cancel delivery, local framing bounds, and disabling inherited console mouse reporting.

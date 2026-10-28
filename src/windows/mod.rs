@@ -6,6 +6,7 @@ pub mod clipboard;
 pub mod console;
 pub mod install;
 pub mod ipc;
+mod policy;
 
 pub fn doctor() -> anyhow::Result<()> {
     println!("Clippy {}", env!("CARGO_PKG_VERSION"));

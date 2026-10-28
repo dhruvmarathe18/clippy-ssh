@@ -1,0 +1,53 @@
+name: Release Windows installer
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag matching Cargo.toml (for example v0.3.1)
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets -- -D warnings
+  windows:
+    needs: linux
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Build single-file installer and portable package
+        run: ./scripts/build-installer.ps1
+      - name: Test installer lifecycle on this disposable runner
+        run: |
+          $version = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages | Where-Object name -eq clippy-ssh).version
+          ./scripts/test-installer.ps1 -Installer "dist/Clippy-Setup-$version-x64.exe"
+      - name: Publish verified prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: ./scripts/publish-release.ps1 -Tag $env:RELEASE_TAG

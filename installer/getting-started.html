@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Clippy SSH · Getting started</title>
+<style>body{font:18px/1.6 system-ui,sans-serif;max-width:760px;margin:70px auto;padding:0 24px;background:#101519;color:#e8eff0}h1{font-size:44px;line-height:1.15}a{color:#76dec5}code{background:#233039;padding:3px 7px;border-radius:5px}li{margin:18px 0}.note{color:#b5c4ca}footer{border-top:1px solid #34434b;margin-top:44px;padding-top:20px;font-size:15px}</style>
+<p>CLIPPY SSH</p><h1>Copy locally.<br>Paste over SSH.</h1>
+<ol><li>Open a <strong>new PowerShell tab in Windows Terminal</strong>.</li>
+<li>Connect with your usual command, such as <code>ssh user@server</code>. Clippy prepares the Linux server automatically using your existing SSH authentication.</li>
+<li>Copy a screenshot or an Explorer file. Press <strong>Ctrl+V</strong> in the remote session. Its uploaded path appears at the cursor.</li></ol>
+<p>The path stays editable. Clippy never presses Enter. For example, type <code>file </code>, paste an image, then press Enter yourself.</p>
+<p>Clippy starts at sign-in. The tray menu lets you pause or exit the background app. Uninstall through <strong>Windows Settings → Apps → Clippy SSH</strong>.</p>
+<p class="note">This preview supports Windows x64, Windows Terminal with PowerShell, Windows OpenSSH, and Linux x86_64/arm64 servers. VS Code, WSL, PuTTY, nested SSH, and containers are not yet supported. Ordinary text paste stays native. Use <code>ssh.exe</code> to bypass Clippy.</p>
+<p class="note">If Windows Terminal is missing, install Microsoft's <a href="https://apps.microsoft.com/detail/9n0dx20hk701">Windows Terminal</a>. OpenSSH Client is available in Windows Settings → Optional features. Managed PowerShell policies may require your administrator's help.</p>
+<footer><a href="https://github.com/dhruvmarathe18/clippy-ssh">Source and documentation</a> · <a href="https://github.com/dhruvmarathe18/clippy-ssh/issues">Report a problem</a> · MIT licensed</footer></html>

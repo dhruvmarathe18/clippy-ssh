@@ -37,8 +37,18 @@ fn run() -> Result<()> {
         "background" => clippy_ssh::windows::background::command(&args)?,
         #[cfg(windows)]
         "install" => {
-            anyhow::ensure!(args.is_empty(), "usage: clippy install");
-            clippy_ssh::windows::install::install()?;
+            anyhow::ensure!(
+                args.iter()
+                    .all(|a| a == "--check" || a == "--enable-profiles"),
+                "usage: clippy install [--check] [--enable-profiles]"
+            );
+            let enable_profiles = args.iter().any(|a| a == "--enable-profiles");
+            if args.iter().any(|a| a == "--check") {
+                clippy_ssh::windows::install::preflight(enable_profiles)?;
+                println!("Clippy installation checks passed.");
+            } else {
+                clippy_ssh::windows::install::install(enable_profiles)?;
+            }
         }
         #[cfg(windows)]
         "uninstall" => {

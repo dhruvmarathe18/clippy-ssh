@@ -1,17 +1,18 @@
-use super::ipc;
+use super::{ipc, policy};
 use crate::integration::profile_block;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
+    os::windows::process::CommandExt,
     path::{Path, PathBuf},
     process::Command,
 };
 use windows::{
     Win32::{
         Foundation::ERROR_FILE_NOT_FOUND,
-        System::{Com::CoTaskMemFree, Registry::*},
+        System::{Com::CoTaskMemFree, Registry::*, Threading::CREATE_NO_WINDOW},
         UI::Shell::*,
     },
     core::{PCWSTR, w},
@@ -26,6 +27,8 @@ struct Manifest {
     script: PathBuf,
     profiles: Vec<PathBuf>,
     startup: String,
+    #[serde(default)]
+    policy_changes: Vec<policy::Change>,
 }
 
 fn root() -> Result<PathBuf> {
@@ -192,7 +195,65 @@ if (!(Test-Path Alias:\clippy) -and !(Test-Path Function:\clippy)) {{
 "#
     )
 }
-pub fn install() -> Result<()> {
+pub fn preflight(enable_profiles: bool) -> Result<()> {
+    let ssh = Command::new("ssh.exe").arg("-V").creation_flags(CREATE_NO_WINDOW.0)
+        .output().context("Windows OpenSSH Client is missing. Enable OpenSSH Client in Windows Settings > Optional features, then run Setup again.")?;
+    ensure!(
+        ssh.status.success(),
+        "Windows OpenSSH Client could not start"
+    );
+    policy::plan(enable_profiles)?;
+    let base = PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA missing")?)
+        .join("Clippy");
+    let script = base.join("shell/ssh.ps1");
+    for folder in ["WindowsPowerShell", "PowerShell"] {
+        edit_profile(
+            &documents()?.join(folder).join("profile.ps1"),
+            Some(&script),
+        )?;
+    }
+    if let Some(startup) = startup_value()? {
+        let previous: Manifest =
+            serde_json::from_slice(&fs::read(base.join("installation.json")).context(
+                "ClippySSH startup entry exists without an installation record; it was not changed",
+            )?)?;
+        ensure!(
+            startup == previous.startup,
+            "ClippySSH startup entry belongs to another installation; it was not changed"
+        );
+    }
+    Ok(())
+}
+
+struct FileBackup {
+    path: PathBuf,
+    bytes: Option<Vec<u8>>,
+}
+impl FileBackup {
+    fn capture(path: &Path) -> Result<Self> {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        Ok(Self {
+            path: path.to_owned(),
+            bytes,
+        })
+    }
+    fn restore(&self) -> Result<()> {
+        if let Some(bytes) = &self.bytes {
+            atomic_write(&self.path, bytes)?;
+        } else if self.path.exists() {
+            fs::remove_file(&self.path)?;
+        }
+        Ok(())
+    }
+}
+
+pub fn install(enable_profiles: bool) -> Result<()> {
+    preflight(enable_profiles)?;
+    let planned_policy = policy::plan(enable_profiles)?;
     let root = root()?;
     let source_client = std::env::current_exe()?;
     let source_background = ipc::sibling("clippy-background.exe")?;
@@ -245,38 +306,74 @@ pub fn install() -> Result<()> {
         .iter()
         .map(|p| edit_profile(p, Some(&script)))
         .collect::<Result<Vec<_>>>()?;
-    atomic_write(
-        &script,
-        &encode(&powershell_script(&client), Encoding::Utf8Bom),
-    )?;
-    let manifest = Manifest {
+    let mut backups = profiles
+        .iter()
+        .map(|p| FileBackup::capture(p))
+        .collect::<Result<Vec<_>>>()?;
+    backups.push(FileBackup::capture(&script)?);
+    backups.push(FileBackup::capture(&manifest_path)?);
+    let mut manifest = Manifest {
         client: client.clone(),
         background,
         script,
         profiles: profiles.clone(),
         startup: startup.clone(),
+        policy_changes: previous.map(|p| p.policy_changes).unwrap_or_default(),
     };
-    atomic_write(&manifest_path, &serde_json::to_vec_pretty(&manifest)?)?;
-    for (path, (old, new)) in profiles.iter().zip(&edits) {
-        if old == new {
-            continue;
+    let mut applied_policy = Vec::new();
+    let installed = (|| -> Result<()> {
+        policy::apply(&planned_policy, &mut applied_policy)?;
+        manifest
+            .policy_changes
+            .extend(applied_policy.iter().cloned());
+        atomic_write(
+            &manifest.script,
+            &encode(&powershell_script(&client), Encoding::Utf8Bom),
+        )?;
+        for (path, (old, new)) in profiles.iter().zip(&edits) {
+            if old == new {
+                continue;
+            }
+            if !old.is_empty() {
+                atomic_write(
+                    &path.with_extension(format!("clippy-backup-{}", uuid::Uuid::new_v4())),
+                    old,
+                )?;
+            }
+            atomic_write(path, new)?;
         }
-        if !old.is_empty() {
-            atomic_write(
-                &path.with_extension(format!("clippy-backup-{}", uuid::Uuid::new_v4())),
-                old,
-            )?;
+        set_startup(Some(&startup))?;
+        atomic_write(&manifest_path, &serde_json::to_vec_pretty(&manifest)?)?;
+        ensure!(
+            Command::new(&client)
+                .args(["background", "start"])
+                .creation_flags(CREATE_NO_WINDOW.0)
+                .status()?
+                .success(),
+            "installed background app could not start"
+        );
+        Ok(())
+    })();
+    if let Err(error) = installed {
+        let mut rollback_errors = Vec::new();
+        for backup in backups.iter().rev() {
+            if let Err(e) = backup.restore() {
+                rollback_errors.push(e.to_string());
+            }
         }
-        atomic_write(path, new)?;
+        if let Err(e) = set_startup(old_startup.as_deref()) {
+            rollback_errors.push(e.to_string());
+        }
+        if let Err(e) = policy::restore(&applied_policy) {
+            rollback_errors.push(e.to_string());
+        }
+        ensure!(
+            rollback_errors.is_empty(),
+            "Installation failed: {error:#}. Configuration restoration needs attention: {}",
+            rollback_errors.join("; ")
+        );
+        return Err(error.context("installation failed; previous configuration restored"));
     }
-    set_startup(Some(&startup))?;
-    ensure!(
-        Command::new(&client)
-            .args(["background", "start"])
-            .status()?
-            .success(),
-        "installed background app could not start"
-    );
     println!(
         "Installed Clippy {} for this Windows user.",
         env!("CARGO_PKG_VERSION")
@@ -285,15 +382,22 @@ pub fn install() -> Result<()> {
     println!("Clippy starts at sign-in. Controls: clippy background status|pause|resume|stop");
     println!("Native bypass: ssh.exe ...   Uninstall integration: clippy uninstall");
     println!(
-        "Existing aliases/functions named ssh or clippy take precedence. PowerShell profile execution must be permitted by your existing policy."
+        "Existing aliases/functions named ssh or clippy take precedence. Explicit PowerShell and organization policies were preserved."
     );
     Ok(())
 }
 pub fn uninstall() -> Result<()> {
     let root = root()?;
     let manifest_path = root.join("installation.json");
-    let manifest: Manifest =
-        serde_json::from_slice(&fs::read(&manifest_path).context("no Clippy installation found")?)?;
+    let bytes = match fs::read(&manifest_path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!("Clippy integration is already removed.");
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let manifest: Manifest = serde_json::from_slice(&bytes)?;
     let documents = documents()?;
     let expected = [
         documents.join("WindowsPowerShell").join("profile.ps1"),
@@ -323,8 +427,10 @@ pub fn uninstall() -> Result<()> {
     if startup_value()?.as_deref() == Some(&manifest.startup) {
         set_startup(None)?;
     }
+    policy::restore(&manifest.policy_changes)?;
     let _ = Command::new(&manifest.client)
         .args(["background", "stop"])
+        .creation_flags(CREATE_NO_WINDOW.0)
         .status();
     fs::remove_file(manifest_path)?;
     println!(

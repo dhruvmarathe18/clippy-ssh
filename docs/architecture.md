@@ -69,4 +69,10 @@ Each bridge worker owns its pipe and alternates a focus/completion poll with one
 
 The optional PowerShell `ssh` function calls `clippy ssh-auto`. Redirected streams, other terminal hosts, unsupported arguments, and incompatible `ssh -G` configuration are forwarded to native OpenSSH. Supported Linux shell connections get a matching remote helper before the normal client starts. `ssh.exe` always remains an explicit bypass.
 
+## Windows installer
+
+The Inno Setup wrapper bundles the Rust client/background pair and both embedded Linux helpers. It calls read-only preflight before installation, then invokes per-user integration from a hidden process. Errors stop Setup rather than displaying a successful finish page. Uninstall removes integration only after the user confirms removal and before installer-owned files are deleted. Running SSH sessions are never closed.
+
+Configuration writes snapshot the profiles, generated script, manifest, and startup value for rollback. Policy handling inspects Windows PowerShell and any PowerShell 7 installation on PATH. Setup may enable `RemoteSigned` only when every persistent scope is unconfigured; it never replaces an explicit or managed policy. Changes are recorded for conditional restoration. The release workflow gates publication on an actual installer lifecycle test in a disposable hosted Windows account.
+
 Adapters for other terminal clients still need reliable focused-session and remote-destination identification. That work is described in the [roadmap](roadmap.md).
