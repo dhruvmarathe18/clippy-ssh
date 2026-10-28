@@ -4,6 +4,37 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hoste
     throw 'This lifecycle test changes user profiles and execution policy. Run only on a disposable GitHub-hosted Windows runner.'
 }
 Remove-Item Env:\PSExecutionPolicyPreference -ErrorAction SilentlyContinue
+$shells = @((Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'), (Get-Command pwsh.exe).Source)
+function Invoke-TestShell([string]$Shell, [string]$Script, [switch]$LoadProfile) {
+    $start = [Diagnostics.ProcessStartInfo]::new($Shell)
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.Environment.Remove('PSExecutionPolicyPreference') | Out-Null
+    $start.Environment.Remove('PSModulePath') | Out-Null
+    $start.ArgumentList.Add('-NoLogo')
+    if (!$LoadProfile) { $start.ArgumentList.Add('-NoProfile') }
+    $start.ArgumentList.Add('-NonInteractive')
+    $start.ArgumentList.Add('-Command')
+    $start.ArgumentList.Add("`$ErrorActionPreference='Stop'; " + $Script)
+    $process = [Diagnostics.Process]::Start($start)
+    $stdout = $process.StandardOutput.ReadToEndAsync()
+    $stderr = $process.StandardError.ReadToEndAsync()
+    if (!$process.WaitForExit(120000)) { throw "Test shell timed out: $Shell" }
+    $output = $stdout.GetAwaiter().GetResult().Trim()
+    $errorText = $stderr.GetAwaiter().GetResult().Trim()
+    if ($process.ExitCode -ne 0) { throw "Test shell failed ($Shell): $output $errorText" }
+    return $output
+}
+function Assert-Policy([string]$Expected) {
+    # PowerShell 7 caches its JSON configuration within a process. Read from a
+    # fresh process after installer changes, and check both supported shells.
+    foreach ($testShell in $shells) {
+        $actual = Invoke-TestShell $testShell '[string](Get-ExecutionPolicy -Scope CurrentUser)'
+        if ($actual -ne $Expected) { throw "Expected $Expected policy in $testShell, got $actual" }
+    }
+}
 $Installer = (Resolve-Path -LiteralPath $Installer).Path
 $clippyRoot = Join-Path $env:LOCALAPPDATA 'Clippy'
 $manifestPath = Join-Path $clippyRoot 'installation.json'
@@ -28,7 +59,9 @@ function Run-Setup([string]$LogName, [bool]$ShouldSucceed = $true) {
 }
 
 # Explicit restrictions must fail preflight, without touching integration.
-Set-ExecutionPolicy -Scope CurrentUser Restricted -Force
+foreach ($testShell in $shells) {
+    Invoke-TestShell $testShell 'Set-ExecutionPolicy -Scope CurrentUser Restricted -Force'
+}
 Run-Setup 'restricted.log' $false
 if (Test-Path -LiteralPath $manifestPath) { throw 'Restricted-policy install changed integration' }
 for ($i=0; $i -lt $profiles.Count; $i++) {
@@ -36,11 +69,13 @@ for ($i=0; $i -lt $profiles.Count; $i++) {
 }
 
 # Model a fresh Windows account: no configured policy at either ordinary scope.
-Set-ExecutionPolicy -Scope CurrentUser Undefined -Force
-Set-ExecutionPolicy -Scope LocalMachine Undefined -Force
+foreach ($testShell in $shells) {
+    Invoke-TestShell $testShell 'Set-ExecutionPolicy -Scope CurrentUser Undefined -Force; Set-ExecutionPolicy -Scope LocalMachine Undefined -Force'
+}
+Assert-Policy 'Undefined'
 Run-Setup 'install.log'
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-if ((Get-ExecutionPolicy -Scope CurrentUser) -ne 'RemoteSigned') { throw 'Default PowerShell policy was not configured' }
+Assert-Policy 'RemoteSigned'
 & $manifest.client background check
 if ($LASTEXITCODE -ne 0) { throw 'Installed background registration failed' }
 $startup = Get-ItemPropertyValue -LiteralPath $runKey -Name ClippySSH
@@ -50,8 +85,11 @@ if (!$backgroundPid) { throw 'Installed background process missing' }
 foreach ($profilePath in $profiles) {
     if ((Select-String -LiteralPath $profilePath -SimpleMatch '# >>> Clippy SSH managed integration >>>').Count -ne 1) { throw 'Profile integration missing or duplicated' }
 }
-$profileCheck = & powershell.exe -NoLogo -NonInteractive -Command "if ((Get-Command ssh).CommandType -ne 'Function') {exit 1}; ClippyInstallerSentinel; ssh -V" 2>&1
-if ($LASTEXITCODE -ne 0 -or ($profileCheck -join ' ') -notmatch 'preserved') { throw 'New PowerShell session did not load integration' }
+foreach ($testShell in $shells) {
+    $profileCheck = Invoke-TestShell $testShell "if ((Get-Command ssh).CommandType -ne 'Function') {exit 1}; ClippyInstallerSentinel; ssh -V" -LoadProfile
+    if ($profileCheck -notmatch 'preserved') { throw "New PowerShell session did not load integration: $testShell" }
+}
+Write-Output 'Fresh install, both PowerShell profiles, startup, and background checks passed.'
 
 Run-Setup 'repeat.log'
 if (!(Get-Process -Id $backgroundPid -ErrorAction SilentlyContinue)) { throw 'Repeat install stopped the background process' }
@@ -83,7 +121,7 @@ if (!$p.WaitForExit(120000) -or $p.ExitCode -ne 0) { throw 'Uninstall failed' }
 if (Test-Path -LiteralPath $manifestPath) { throw 'Uninstall left its installation record' }
 if (Get-ItemProperty -LiteralPath $runKey -Name ClippySSH -ErrorAction SilentlyContinue) { throw 'Uninstall left startup enabled' }
 if (Test-Path -LiteralPath $uninstallKey) { throw 'Uninstall left Windows Apps registration' }
-if ((Get-ExecutionPolicy -Scope CurrentUser) -ne 'Undefined') { throw 'Uninstall did not restore the original profile policy' }
+Assert-Policy 'Undefined'
 for ($i=0; $i -lt $profiles.Count; $i++) {
     if ((Get-FileHash -LiteralPath $profiles[$i]).Hash -ne $originalProfiles[$i]) { throw 'Uninstall changed unrelated profile content or encoding' }
 }
