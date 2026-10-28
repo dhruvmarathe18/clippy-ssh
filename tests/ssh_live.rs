@@ -18,7 +18,8 @@ struct Session {
     events: mpsc::Receiver<Message>,
     connection: Connection,
     fixture: String,
-    uploads: Vec<String>,
+    uploads: Vec<(String, Option<String>)>,
+    upload_user: Option<String>,
 }
 impl Session {
     fn open() -> Option<Self> {
@@ -62,6 +63,7 @@ impl Session {
             connection,
             fixture,
             uploads: vec![],
+            upload_user: None,
         };
         session.send(Message::Start {
             term: "xterm-256color".into(),
@@ -123,7 +125,7 @@ impl Session {
                 ..
             } => {
                 assert!(inserted, "{detail}");
-                self.uploads.push(id);
+                self.uploads.push((id, self.upload_user.clone()));
                 paths
             }
             m => panic!("{m:?}"),
@@ -140,11 +142,18 @@ impl Drop for Session {
             "export TMUX_TMPDIR=\"$HOME/{}/tmux\"; tmux kill-server 2>/dev/null || true; rm -rf -- \"$HOME/{}\"",
             self.fixture, self.fixture
         );
-        for id in &self.uploads {
+        for (id, user) in &self.uploads {
             assert!(uuid::Uuid::parse_str(id).is_ok());
-            script.push_str(&format!(
-                "; rm -rf -- \"$HOME/.local/share/clippy/uploads/{id}\""
-            ));
+            let cleanup = format!("rm -rf -- \"$HOME/.local/share/clippy/uploads/{id}\"");
+            if let Some(user) = user {
+                script.push_str(&format!(
+                    "; sudo -n -H -u {} -- sh -c {}",
+                    shell_quote(user),
+                    shell_quote(&cleanup)
+                ));
+            } else {
+                script.push_str(&format!("; {cleanup}"));
+            }
         }
         let _ = self.connection.command(&script).status();
     }
@@ -360,7 +369,234 @@ fn live_tmux_target_change_keeps_files_without_pasting() {
             assert!(!inserted);
             assert_eq!(paths.len(), 1);
             assert!(detail.contains("changed"));
-            s.uploads.push(id);
+            s.uploads.push((id, s.upload_user.clone()));
+        }
+        m => panic!("{m:?}"),
+    }
+    s.ready();
+}
+
+#[test]
+fn live_sudo_su_saves_as_foreground_user_without_enter() {
+    let Ok(user) = std::env::var("CLIPPY_TEST_SWITCH_USER") else {
+        return;
+    };
+    let Some(mut s) = Session::open() else {
+        return;
+    };
+    let identity = s
+        .connection
+        .command(&format!("id -u -- {}", shell_quote(&user)))
+        .output()
+        .unwrap();
+    assert!(identity.status.success());
+    let uid = String::from_utf8(identity.stdout)
+        .unwrap()
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+    s.send(Message::Input(
+        format!("sudo -n su -- {}\r", shell_quote(&user)).into_bytes(),
+    ));
+    std::thread::sleep(Duration::from_millis(750));
+    s.ready();
+    s.upload_user = Some(user.clone());
+    s.send(Message::Input(
+        b"printf '\\137USER_PATH\\137%s\\137END\\137\\n' ".to_vec(),
+    ));
+    let data = b"switched user\0PNG payload";
+    let id = s.begin(vec![FileSpec {
+        name: "a screenshot's.png".into(),
+        size: data.len() as u64,
+    }]);
+    s.send(Message::Chunk {
+        index: 0,
+        offset: 0,
+        data: data.to_vec(),
+    });
+    s.send(Message::FinishFile {
+        index: 0,
+        sha256: Sha256::digest(data).into(),
+    });
+    let paths = s.complete(id);
+    let mut output = String::new();
+    while let Ok(message) = s.events.recv_timeout(Duration::from_millis(200)) {
+        if let Message::Output(bytes) = message {
+            output.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        assert!(
+            !output.contains("_USER_PATH_"),
+            "paste executed the command"
+        );
+    }
+    s.send(Message::Input(b" | sha256sum\r".to_vec()));
+    s.output(&hex::encode(Sha256::digest(format!(
+        "_USER_PATH_{}_END_\n",
+        paths[0]
+    ))));
+    s.ready();
+    // Read the file from the switched shell, then verify ownership and private permissions independently.
+    s.send(Message::Input(
+        format!("sha256sum -- {}\r", shell_quote(&paths[0])).into_bytes(),
+    ));
+    s.output(&hex::encode(Sha256::digest(data)));
+    let verify = s
+        .connection
+        .command(&format!(
+            "sudo -n -H -u {} -- stat -c '%u:%a' -- {}",
+            shell_quote(&user),
+            shell_quote(&paths[0])
+        ))
+        .output()
+        .unwrap();
+    assert!(verify.status.success());
+    assert_eq!(
+        String::from_utf8(verify.stdout).unwrap().trim(),
+        format!("{uid}:600")
+    );
+    s.ready();
+    // Cancellation must remove the switched user's private staging directory.
+    let cancelled = s.begin(vec![FileSpec {
+        name: "cancelled.bin".into(),
+        size: 20,
+    }]);
+    s.send(Message::Chunk {
+        index: 0,
+        offset: 0,
+        data: vec![1; 5],
+    });
+    s.send(Message::Cancel {
+        id: cancelled.clone(),
+    });
+    s.until(|m| matches!(m, Message::Completed { .. }));
+    let check = format!(
+        "test ! -e \"$HOME/.local/share/clippy/uploads/.partial-{cancelled}\" && test ! -e \"$HOME/.local/share/clippy/uploads/{cancelled}\""
+    );
+    assert!(
+        s.connection
+            .command(&format!(
+                "sudo -n -H -u {} -- sh -c {}",
+                shell_quote(&user),
+                shell_quote(&check)
+            ))
+            .status()
+            .unwrap()
+            .success()
+    );
+    let corrupt = s.begin(vec![FileSpec {
+        name: "corrupt.bin".into(),
+        size: 1,
+    }]);
+    s.send(Message::Chunk {
+        index: 0,
+        offset: 0,
+        data: vec![1],
+    });
+    s.send(Message::FinishFile {
+        index: 0,
+        sha256: [0; 32],
+    });
+    s.send(Message::Commit {
+        id: corrupt.clone(),
+    });
+    s.until(|m| matches!(m, Message::Error { .. }));
+    let check = format!(
+        "test ! -e \"$HOME/.local/share/clippy/uploads/.partial-{corrupt}\" && test ! -e \"$HOME/.local/share/clippy/uploads/{corrupt}\""
+    );
+    assert!(
+        s.connection
+            .command(&format!(
+                "sudo -n -H -u {} -- sh -c {}",
+                shell_quote(&user),
+                shell_quote(&check)
+            ))
+            .status()
+            .unwrap()
+            .success()
+    );
+    s.send(Message::Input(b"exit\r".to_vec()));
+    std::thread::sleep(Duration::from_millis(200));
+    s.upload_user = None;
+    s.ready();
+    // Returning to the original shell must restore its normal upload destination.
+    let id = s.begin(vec![FileSpec {
+        name: "back.txt".into(),
+        size: 0,
+    }]);
+    s.send(Message::FinishFile {
+        index: 0,
+        sha256: Sha256::digest([]).into(),
+    });
+    let original = s.complete(id);
+    assert_ne!(
+        std::path::Path::new(&original[0]).components().nth(2),
+        std::path::Path::new(&paths[0]).components().nth(2)
+    );
+}
+
+#[test]
+fn live_sudo_user_exit_keeps_files_without_pasting_into_parent() {
+    let Ok(user) = std::env::var("CLIPPY_TEST_SWITCH_USER") else {
+        return;
+    };
+    let Some(mut s) = Session::open() else {
+        return;
+    };
+    s.send(Message::Input(
+        format!("sudo -n su -- {}\r", shell_quote(&user)).into_bytes(),
+    ));
+    std::thread::sleep(Duration::from_millis(750));
+    s.ready();
+    s.upload_user = Some(user);
+    s.send(Message::Input(
+        b"printf '\\137OWN_SHELL\\137%s\\137END\\137\\n' \"$$\"\r".to_vec(),
+    ));
+    let mut output = String::new();
+    s.until(|m| {
+        if let Message::Output(b) = m {
+            output.push_str(&String::from_utf8_lossy(b));
+        }
+        output.contains("_OWN_SHELL_") && output.contains("_END_")
+    });
+    let pid = output
+        .split("_OWN_SHELL_")
+        .nth(1)
+        .unwrap()
+        .split("_END_")
+        .next()
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+    s.ready();
+    let id = s.begin(vec![FileSpec {
+        name: "changed-user.bin".into(),
+        size: 0,
+    }]);
+    s.send(Message::FinishFile {
+        index: 0,
+        sha256: Sha256::digest([]).into(),
+    });
+    // This PID came from the uniquely created test session, never a user session.
+    assert!(
+        s.connection
+            .command(&format!("sudo -n kill -HUP -- {pid}"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    s.send(Message::Commit { id: id.clone() });
+    match s.until(|m| matches!(m, Message::Completed { .. } | Message::Error { .. })) {
+        Message::Completed {
+            paths,
+            inserted,
+            detail,
+            ..
+        } => {
+            assert!(!inserted);
+            assert_eq!(paths.len(), 1);
+            assert!(detail.contains("changed"));
+            s.uploads.push((id, s.upload_user.clone()));
         }
         m => panic!("{m:?}"),
     }

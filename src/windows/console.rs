@@ -1,5 +1,20 @@
 use anyhow::Result;
+use std::io::Write;
 use windows::Win32::{Foundation::HANDLE, System::Console::*};
+
+// Clear terminal mouse modes left by a previous application. Remote TUIs may
+// enable their own modes after connection; their output passes through unchanged.
+const RESET_MOUSE: &[u8] = b"\x1b[?9;1000;1002;1003;1005;1006;1015;1016l";
+
+fn raw_input_mode(original: CONSOLE_MODE) -> CONSOLE_MODE {
+    (original | ENABLE_VIRTUAL_TERMINAL_INPUT | ENABLE_EXTENDED_FLAGS)
+        & !(ENABLE_ECHO_INPUT
+            | ENABLE_LINE_INPUT
+            | ENABLE_PROCESSED_INPUT
+            | ENABLE_QUICK_EDIT_MODE
+            | ENABLE_MOUSE_INPUT
+            | ENABLE_WINDOW_INPUT)
+}
 pub struct RawConsole {
     input: HANDLE,
     output: HANDLE,
@@ -21,28 +36,31 @@ impl RawConsole {
                 input_mode,
                 output_mode,
             };
-            let mode = (input_mode | ENABLE_VIRTUAL_TERMINAL_INPUT | ENABLE_EXTENDED_FLAGS)
-                & !(ENABLE_ECHO_INPUT
-                    | ENABLE_LINE_INPUT
-                    | ENABLE_PROCESSED_INPUT
-                    | ENABLE_QUICK_EDIT_MODE);
-            SetConsoleMode(input, mode)?;
+            // ConPTY translates ENABLE_MOUSE_INPUT + disabled Quick Edit into
+            // all-motion reports. Those bytes otherwise reach an ordinary shell.
+            SetConsoleMode(input, raw_input_mode(input_mode))?;
             SetConsoleMode(
                 output,
                 output_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT,
             )?;
+            let mut out = std::io::stdout().lock();
+            out.write_all(RESET_MOUSE)?;
+            out.flush()?;
             Ok(state)
         }
     }
 }
 impl Drop for RawConsole {
     fn drop(&mut self) {
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(RESET_MOUSE).and_then(|_| out.flush());
         unsafe {
             let _ = SetConsoleMode(self.input, self.input_mode);
             let _ = SetConsoleMode(self.output, self.output_mode);
         }
     }
 }
+
 pub fn size() -> (u16, u16) {
     unsafe {
         let mut info = CONSOLE_SCREEN_BUFFER_INFO::default();
@@ -69,4 +87,23 @@ pub fn set_title(title: &str) -> Result<()> {
         SetConsoleTitleW(windows::core::PCWSTR(text.as_ptr()))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_mode_does_not_request_mouse_or_resize_events() {
+        let original = ENABLE_MOUSE_INPUT
+            | ENABLE_WINDOW_INPUT
+            | ENABLE_QUICK_EDIT_MODE
+            | ENABLE_LINE_INPUT
+            | ENABLE_ECHO_INPUT
+            | ENABLE_PROCESSED_INPUT;
+        let raw = raw_input_mode(original);
+        assert_eq!((raw & original).0, 0);
+        assert_ne!((raw & ENABLE_VIRTUAL_TERMINAL_INPUT).0, 0);
+        assert_ne!((raw & ENABLE_EXTENDED_FLAGS).0, 0);
+    }
 }

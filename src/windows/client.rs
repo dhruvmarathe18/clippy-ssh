@@ -79,11 +79,18 @@ pub fn connect(connection: Connection) -> Result<()> {
     )?;
     let (tx, rx) = mpsc::channel();
     let remote_tx = tx.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let output_stop = stop.clone();
     thread::spawn(move || {
         loop {
             match protocol::receive(&mut reader) {
                 Ok(Message::Output(data)) => {
                     let mut out = std::io::stdout().lock();
+                    // Check while holding stdout so late remote output cannot
+                    // re-enable terminal modes after RawConsole restores them.
+                    if output_stop.load(Ordering::SeqCst) {
+                        break;
+                    }
                     if out.write_all(&data).and_then(|_| out.flush()).is_err() {
                         break;
                     }
@@ -100,7 +107,6 @@ pub fn connect(connection: Connection) -> Result<()> {
             }
         }
     });
-    let stop = Arc::new(AtomicBool::new(false));
     let input_stop = stop.clone();
     let input_writer = writer.clone();
     let state = bridge.state.clone();

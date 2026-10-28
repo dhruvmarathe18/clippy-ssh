@@ -4,6 +4,21 @@ Run automated tests first. Record manual results rather than assuming that an SS
 
 ## Recorded results — 2026-10-29
 
+Version 0.3.0 development checks:
+
+- 23 Windows unit tests passed, including profile encoding/preservation, native-routing decisions, stale/ambiguous focus rejection, session-registration cleanup, queued paste/cancel delivery, local framing bounds, and disabling inherited console mouse reporting.
+- Windows and Linux static analysis passed before the final packaging pass.
+- Background start, local session registration/unregistration, pause, resume, status, and stop passed on Windows.
+- Native `ssh -V` passthrough passed.
+- The isolated background runtime test passed with captured output: startup returned without retaining the caller's output handles, session registration/unregistration and pause/resume worked, and an unrelated process was rejected by the IPC server.
+- Six existing direct SSH transfer tests passed with the 0.3 helper.
+- Two additional live sudo/su tests passed: upload/read as a different UID, mode 0600, command preservation without Enter, cancellation and corrupt-data cleanup, return to the original user, and switched-shell exit preventing insertion into the parent.
+- All eight live tests also passed through ProxyJump, using the test host as a bastion to its own loopback SSH endpoint.
+- User installation, repeat-install idempotency, startup registry entry, new PowerShell profile loading, and native SSH remote-command passthrough passed. Existing sessions were retained.
+- The first manual 0.3 paste attempt failed. Inspection found concurrent reads/writes on cloned synchronous named-pipe handles could block focus updates. The bridge now uses alternating poll/reply exchanges, and the isolated Windows runtime check passes 100 consecutive focus exchanges before unregistering. Manual verification of that correction is pending.
+
+Startup-at-sign-in has not been verified by logging the user out. The mouse reporting correction and final Ctrl+V behavior still require the manual checks below.
+
 Version 0.2.1:
 
 - 13 unit tests passed on Windows x64.
@@ -17,7 +32,14 @@ The user manually confirmed screenshot upload and Ctrl+V path insertion in versi
 
 ## Manual checklist
 
+- [ ] Install once, open a new PowerShell tab, and connect with ordinary `ssh`. Confirm image/file paste without a Clippy launcher command.
+- [ ] Pause/resume from the tray; confirm native text paste remains available.
+- [ ] Stop and restart the background app while SSH stays open. Confirm it re-registers and file paste resumes.
+- [ ] Verify sign-in startup and uninstall on a disposable Windows profile.
+
 - [ ] Copy a screenshot with transparency; paste via Ctrl+V at a shell prompt. Confirm a readable remote PNG and its quoted path at the cursor, without an automatic Enter or success popup.
+- [ ] Move the mouse over an ordinary remote prompt and after `sudo su USER`; no mouse-report numbers should appear. Check mouse support in a remote TUI that explicitly enables it.
+- [ ] After `sudo su USER`, paste a screenshot and verify the switched user can read the inserted path.
 - [ ] Copy two Explorer files with the same basename from different directories. Confirm both remote hashes and distinct paths.
 - [ ] Type `file `, then paste using Ctrl+Shift+V. Confirm a quoted path is inserted without pressing Enter.
 - [ ] Paste into a terminal application's input prompt with Ctrl+V. Confirm the saved path is inserted without pressing Enter.

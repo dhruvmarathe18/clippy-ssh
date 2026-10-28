@@ -1,7 +1,7 @@
 use crate::{
     protocol::{self, Message},
     terminal::{PasteMode, paths_text},
-    transfer::{self, Upload},
+    transfer,
 };
 use anyhow::{Context, Result, bail, ensure};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -15,6 +15,9 @@ use std::{
 };
 
 type Output = Arc<Mutex<io::Stdout>>;
+mod destination;
+mod user_upload;
+use user_upload::DestinationUpload;
 fn send(out: &Output, msg: &Message) -> Result<()> {
     protocol::send(&mut *out.lock().unwrap(), msg)
 }
@@ -22,15 +25,19 @@ fn send(out: &Output, msg: &Message) -> Result<()> {
 #[derive(Debug, PartialEq, Eq, Clone)]
 enum Target {
     Direct {
-        pid: i32,
-        start: String,
+        chain: Vec<destination::Identity>,
     },
     Tmux {
         pane: String,
         tty: String,
-        pid: i32,
-        start: String,
+        chain: Vec<destination::Identity>,
     },
+}
+impl Target {
+    fn uid(&self) -> u32 {
+        let (Self::Direct { chain } | Self::Tmux { chain, .. }) = self;
+        chain.last().unwrap().uid
+    }
 }
 fn identity(fd: i32) -> Result<(i32, String, String)> {
     let pid = unsafe { libc::tcgetpgrp(fd) };
@@ -52,7 +59,7 @@ fn process_identity(pid: i32) -> Result<(i32, String, String)> {
     Ok((pid, start, comm))
 }
 fn target(fd: i32, tty: &str) -> Result<Target> {
-    let (pid, start, comm) = identity(fd)?;
+    let (pid, _, comm) = identity(fd)?;
     if comm.starts_with("tmux") {
         let result=Command::new("tmux").args(["list-clients","-F","#{client_tty}|#{pane_id}|#{pane_tty}|#{client_prefix}|#{client_key_table}|#{pane_in_mode}|#{pane_pid}"]).output()?;
         ensure!(
@@ -86,25 +93,16 @@ fn target(fd: i32, tty: &str) -> Result<Target> {
             .nth(5)
             .context("missing pane foreground process group")?
             .parse::<i32>()?;
-        let (pid, start, comm) = process_identity(foreground)?;
-        check_process(&comm)?;
         Ok(Target::Tmux {
             pane: fields[1].into(),
             tty: fields[2].into(),
-            pid,
-            start,
+            chain: destination::resolve(foreground)?,
         })
     } else {
-        check_process(&comm)?;
-        Ok(Target::Direct { pid, start })
+        Ok(Target::Direct {
+            chain: destination::resolve(pid)?,
+        })
     }
-}
-fn check_process(comm: &str) -> Result<()> {
-    ensure!(
-        !["ssh", "mosh", "docker", "podman", "kubectl", "su", "sudo"].contains(&comm),
-        "pasting into nested SSH, containers, or another user is not supported"
-    );
-    Ok(())
 }
 fn inject(
     target: &Target,
@@ -142,6 +140,10 @@ fn inject(
 }
 pub fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("receive-as") {
+        ensure!(args.len() == 2, "receive-as requires a UID");
+        return user_upload::receive_as(args[1].parse()?);
+    }
     let home = std::env::var("HOME").context("HOME is required")?;
     match args.first().map(String::as_str) {
         Some("serve") => serve(&home),
@@ -246,7 +248,7 @@ fn serve(home: &str) -> Result<()> {
         }
     });
     let mut writer = pair.master.take_writer()?;
-    let mut upload: Option<(Upload, Target)> = None;
+    let mut upload: Option<(DestinationUpload, Target)> = None;
     send(&output, &Message::Started)?;
     let result = (|| -> Result<()> {
         loop {
@@ -258,7 +260,7 @@ fn serve(home: &str) -> Result<()> {
                 Message::Begin { id, .. } | Message::Commit { id } | Message::Cancel { id } => {
                     Some(id.clone())
                 }
-                _ => upload.as_ref().map(|u| u.0.id.clone()),
+                _ => upload.as_ref().map(|u| u.0.id().to_owned()),
             };
             let action = (|| -> Result<()> {
                 match message {
@@ -278,7 +280,10 @@ fn serve(home: &str) -> Result<()> {
                     Message::Begin { id, files } => {
                         ensure!(upload.is_none(), "another upload is active");
                         let destination = target(fd, &tty)?;
-                        upload = Some((Upload::begin(&root, &id, files)?, destination));
+                        upload = Some((
+                            DestinationUpload::begin(&root, destination.uid(), &id, files)?,
+                            destination,
+                        ));
                         send(&output, &Message::Accepted { id })?;
                     }
                     Message::Chunk {
@@ -297,7 +302,7 @@ fn serve(home: &str) -> Result<()> {
                         .finish(index, sha256)?,
                     Message::Commit { id } => {
                         ensure!(
-                            upload.as_ref().map(|u| u.0.id.as_str()) == Some(id.as_str()),
+                            upload.as_ref().map(|u| u.0.id()) == Some(id.as_str()),
                             "upload ID mismatch"
                         );
                         let (batch, original) = upload.take().unwrap();
@@ -325,7 +330,7 @@ fn serve(home: &str) -> Result<()> {
                         )?;
                     }
                     Message::Cancel { id } => {
-                        if upload.as_ref().map(|u| u.0.id.as_str()) == Some(id.as_str()) {
+                        if upload.as_ref().map(|u| u.0.id()) == Some(id.as_str()) {
                             upload.take();
                         }
                         send(

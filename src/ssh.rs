@@ -198,6 +198,12 @@ mod tests {
             vec!["-oRemoteCommand=bad", "host"],
             vec!["host", "rm"],
             vec!["-N", "host"],
+            vec!["-L", "8080:localhost:80", "host"],
+            vec!["-D", "1080", "host"],
+            vec!["-G", "host"],
+            vec!["-V"],
+            vec!["-s", "host", "sftp"],
+            vec!["-f", "host"],
         ] {
             assert!(Connection::parse(&a(&v)).is_err());
         }

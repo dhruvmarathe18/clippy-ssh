@@ -1,6 +1,6 @@
 # Contributing to Clippy SSH
 
-Thanks for helping make clipboard transfer over SSH easier. This is a working Windows-to-Linux prototype with a broader background-app workflow still to build.
+Thanks for helping make clipboard transfer over SSH easier. This is a working Windows-to-Linux prototype with a background app and automatic PowerShell integration. More terminal adapters and compatibility testing are still needed.
 
 ## Pick a change
 
@@ -32,6 +32,15 @@ Transfer that artifact to your Windows development machine and use `clippy setup
 
 The `.tools` directory is a maintainer-local toolchain cache, not a project dependency. Contributors with a normal Rust installation do not need `scripts/env.ps1`.
 
+For the opt-in background runtime test on a Windows desktop:
+
+```powershell
+$env:CLIPPY_TEST_BACKGROUND = '1'
+cargo test --locked --test background_live -- --nocapture
+```
+
+It copies the client and background binaries into its own temporary directory, starts that isolated background instance, checks registration/pause/resume/peer rejection, and stops only that instance. It does not modify profiles or startup configuration. Ordinary CI skips this desktop test.
+
 ## Live tests
 
 Use a Linux test account you control, with `tmux`, `python3`, `sha256sum`, and the matching Clippy helper installed. The test runner uses noninteractive authentication, so configure an SSH key or agent before starting it.
@@ -42,6 +51,8 @@ cargo test --locked --test ssh_live -- --nocapture --test-threads=1
 ```
 
 Tests create their own fixture directories and isolated tmux servers. They remove only their own generated fixtures and completed batches. Never adapt a test to terminate an existing user session or remove an unbounded remote directory.
+
+Set `CLIPPY_TEST_SWITCH_USER` to an existing test username to enable the sudo/su cases. The login account needs existing noninteractive sudo permission. These cases verify owner-only files, no automatic Enter, cancellation, integrity rejection, and returning to the original account. The destination-change test sends SIGHUP only to the shell PID it just created and read back from its own test PTY.
 
 Protocol tests do not prove keyboard routing or popup behavior. For Windows bridge changes, record relevant manual results from the [validation checklist](docs/validation.md), including any cases you could not run.
 

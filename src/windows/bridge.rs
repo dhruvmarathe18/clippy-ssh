@@ -1,13 +1,16 @@
 use super::{
+    background,
     clipboard::{self, Item},
     console,
+    ipc::{self, Request, Response},
 };
 use anyhow::{Context, Result, bail};
 use std::{
+    fs::File,
     sync::{
-        Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicIsize, Ordering},
-        mpsc::{self, Receiver, SyncSender},
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver},
     },
     thread,
     time::{Duration, Instant},
@@ -15,8 +18,8 @@ use std::{
 use windows::{
     Win32::{
         Foundation::*,
-        System::{Com::*, Threading::GetCurrentThreadId},
-        UI::{Accessibility::*, Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
+        System::Com::*,
+        UI::{Accessibility::*, WindowsAndMessaging::*},
     },
     core::{PCWSTR, w},
 };
@@ -26,18 +29,12 @@ pub enum Event {
     Cancel,
     Error(String),
 }
-enum Trigger {
-    Paste { sequence: u32, window: isize },
-    Cancel,
-}
 pub struct State {
     pub busy: AtomicBool,
     pub cancel: AtomicBool,
     active: AtomicBool,
-    window: AtomicIsize,
-    swallow_v: AtomicBool,
     stop: AtomicBool,
-    trigger: SyncSender<Trigger>,
+    finished: AtomicBool,
     pub status: Mutex<(String, Instant)>,
 }
 impl State {
@@ -47,31 +44,40 @@ impl State {
     pub fn finish(&self) {
         self.busy.store(false, Ordering::SeqCst);
         self.cancel.store(false, Ordering::SeqCst);
+        self.finished.store(true, Ordering::SeqCst);
     }
 }
 pub struct Bridge {
     pub state: Arc<State>,
     pub events: Receiver<Event>,
-    hook_thread: u32,
 }
-static STATE: OnceLock<Arc<State>> = OnceLock::new();
+fn register(state: &State) -> Result<File> {
+    let mut pipe = ipc::connect()?;
+    ipc::send(
+        &mut pipe,
+        &Request::Register {
+            busy: state.busy.load(Ordering::SeqCst),
+        },
+    )?;
+    anyhow::ensure!(
+        matches!(ipc::receive::<Response>(&mut pipe)?, Response::Registered),
+        "session registration failed"
+    );
+    Ok(pipe)
+}
 impl Bridge {
     pub fn start() -> Result<Self> {
-        let (trigger_tx, trigger_rx) = mpsc::sync_channel(8);
+        background::ensure_running()?;
         let (event_tx, events) = mpsc::channel();
         let state = Arc::new(State {
             busy: AtomicBool::new(false),
             cancel: AtomicBool::new(false),
             active: AtomicBool::new(false),
-            window: AtomicIsize::new(0),
-            swallow_v: AtomicBool::new(false),
             stop: AtomicBool::new(false),
-            trigger: trigger_tx,
+            finished: AtomicBool::new(false),
             status: Mutex::new((String::new(), Instant::now())),
         });
-        STATE
-            .set(state.clone())
-            .map_err(|_| anyhow::anyhow!("paste bridge already running"))?;
+        let mut pipe = register(&state)?;
         let marker = format!("Clippy-register-{}", uuid::Uuid::new_v4());
         let title = console::title();
         console::set_title(&marker)?;
@@ -99,15 +105,18 @@ impl Bridge {
                 }
             })();
             let (automation, registered) = match init {
-                Ok(v) => {
+                Ok(value) => {
                     let _ = ready_tx.send(Ok(()));
-                    v
+                    value
                 }
-                Err(e) => {
-                    let _ = ready_tx.send(Err(format!("{e:#}")));
+                Err(error) => {
+                    let _ = ready_tx.send(Err(error.to_string()));
+                    let _ = ipc::send(&mut pipe, &Request::Unregister);
                     return;
                 }
             };
+            let mut pipe = Some(pipe);
+            let mut retry = Instant::now();
             while !worker_state.stop.load(Ordering::Relaxed) {
                 let is_current = || unsafe {
                     automation
@@ -117,20 +126,37 @@ impl Bridge {
                         .unwrap_or(false)
                 };
                 let active = is_current();
-                worker_state.window.store(
-                    if active {
-                        unsafe { GetForegroundWindow().0 as isize }
-                    } else {
-                        0
-                    },
-                    Ordering::SeqCst,
-                );
                 worker_state.active.store(active, Ordering::SeqCst);
-                match trigger_rx.recv_timeout(Duration::from_millis(25)) {
-                    Ok(Trigger::Cancel) => {
-                        let _ = event_tx.send(Event::Cancel);
+                let window = if active {
+                    unsafe { GetForegroundWindow().0 as isize }
+                } else {
+                    0
+                };
+                if pipe.is_none() && retry.elapsed() > Duration::from_secs(1) {
+                    retry = Instant::now();
+                    if let Ok(connection) = register(&worker_state) {
+                        pipe = Some(connection);
                     }
-                    Ok(Trigger::Paste { sequence, window }) => {
+                }
+                // One owner performs alternating writes/reads. Concurrent I/O on
+                // cloned synchronous pipe handles deadlocks the focus heartbeat.
+                let next = pipe.as_mut().map(|connection| -> Result<Response> {
+                    ipc::send(
+                        connection,
+                        &Request::Poll {
+                            active,
+                            window,
+                            finished: worker_state.finished.swap(false, Ordering::SeqCst),
+                        },
+                    )?;
+                    ipc::receive(connection)
+                });
+                match next {
+                    Some(Ok(Response::Paste { sequence, window })) => {
+                        if worker_state.busy.swap(true, Ordering::SeqCst) {
+                            continue;
+                        }
+                        worker_state.cancel.store(false, Ordering::SeqCst);
                         let snapshot = (|| -> Result<Vec<Item>> {
                             if !is_current()
                                 || unsafe { GetForegroundWindow().0 as isize } != window
@@ -149,15 +175,26 @@ impl Bridge {
                             Ok(items) => {
                                 let _ = event_tx.send(Event::Paste { items });
                             }
-                            Err(e) => {
+                            Err(error) => {
                                 worker_state.finish();
-                                let _ = event_tx.send(Event::Error(format!("{e:#}")));
+                                let _ = event_tx.send(Event::Error(error.to_string()));
                             }
                         }
                     }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Some(Ok(Response::Cancel)) => {
+                        worker_state.cancel.store(true, Ordering::SeqCst);
+                        let _ = event_tx.send(Event::Cancel);
+                    }
+                    Some(Err(_)) => {
+                        pipe = None;
+                        let _ = event_tx.send(Event::Error("Background app stopped. SSH stays connected; run clippy background start to restore file paste.".into()));
+                    }
+                    _ => {}
                 }
+                thread::sleep(Duration::from_millis(25));
+            }
+            if let Some(mut connection) = pipe {
+                let _ = ipc::send(&mut connection, &Request::Unregister);
             }
             unsafe {
                 CoUninitialize();
@@ -169,128 +206,26 @@ impl Bridge {
         let _ = console::set_title(&title);
         match ready {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                state.stop.store(true, Ordering::Relaxed);
-                bail!("{e}");
+            Ok(Err(error)) => {
+                state.stop.store(true, Ordering::SeqCst);
+                bail!("{error}");
             }
-            Err(e) => {
-                state.stop.store(true, Ordering::Relaxed);
-                return Err(e);
+            Err(error) => {
+                state.stop.store(true, Ordering::SeqCst);
+                return Err(error);
             }
         }
-        let (hook_tx, hook_rx) = mpsc::channel();
-        thread::spawn(move || unsafe {
-            match install_hook() {
-                Ok(hook) => {
-                    let _ = hook_tx.send(Ok(GetCurrentThreadId()));
-                    let mut msg = MSG::default();
-                    while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
-                        let _ = TranslateMessage(&msg);
-                        DispatchMessageW(&msg);
-                    }
-                    let _ = UnhookWindowsHookEx(hook);
-                }
-                Err(e) => {
-                    let _ = hook_tx.send(Err(e.to_string()));
-                }
-            }
-        });
-        let hook_thread = hook_rx.recv()?.map_err(|e| anyhow::anyhow!(e))?;
         let popup_state = state.clone();
         thread::spawn(move || popup(popup_state));
-        Ok(Self {
-            state,
-            events,
-            hook_thread,
-        })
+        Ok(Self { state, events })
     }
-}
-unsafe fn install_hook() -> windows::core::Result<HHOOK> {
-    let module = unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(None)? };
-    unsafe {
-        SetWindowsHookExW(
-            WH_KEYBOARD_LL,
-            Some(keyboard_hook),
-            Some(HINSTANCE(module.0)),
-            0,
-        )
-    }
-}
-pub fn check_hook_support() -> Result<()> {
-    // Installation/removal only: this diagnostic never reads or generates keyboard input.
-    unsafe {
-        let hook = install_hook()?;
-        UnhookWindowsHookEx(hook)?;
-    }
-    Ok(())
 }
 impl Drop for Bridge {
     fn drop(&mut self) {
         self.state.stop.store(true, Ordering::SeqCst);
-        unsafe {
-            let _ = PostThreadMessageW(self.hook_thread, WM_QUIT, WPARAM(0), LPARAM(0));
-        }
     }
 }
 
-unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 {
-        if let Some(state) = STATE.get() {
-            // Never perform clipboard reads, COM calls, or network operations inside this callback.
-            let key = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
-            // Accessibility/remapping software can synthesize legitimate paste keys.
-            // Clippy never injects keystrokes itself, so there is no recursion to filter.
-            {
-                let down = wparam.0 as u32 == WM_KEYDOWN || wparam.0 as u32 == WM_SYSKEYDOWN;
-                let up = wparam.0 as u32 == WM_KEYUP || wparam.0 as u32 == WM_SYSKEYUP;
-                if key.vkCode == VK_V.0 as u32
-                    && up
-                    && state.swallow_v.swap(false, Ordering::SeqCst)
-                {
-                    return LRESULT(1);
-                }
-                let foreground = unsafe { GetForegroundWindow().0 as isize };
-                if down
-                    && state.active.load(Ordering::SeqCst)
-                    && foreground == state.window.load(Ordering::SeqCst)
-                {
-                    let ctrl = unsafe { GetAsyncKeyState(VK_CONTROL.0 as i32) } < 0;
-                    let alt = unsafe { GetAsyncKeyState(VK_MENU.0 as i32) } < 0;
-                    if ctrl
-                        && !alt
-                        && key.vkCode == VK_C.0 as u32
-                        && state.busy.load(Ordering::SeqCst)
-                    {
-                        state.cancel.store(true, Ordering::SeqCst);
-                        let _ = state.trigger.try_send(Trigger::Cancel);
-                        return LRESULT(1);
-                    }
-                    if ctrl && !alt && key.vkCode == VK_V.0 as u32 && clipboard::has_rich_content()
-                    {
-                        state.swallow_v.store(true, Ordering::SeqCst);
-                        if !state.busy.swap(true, Ordering::SeqCst) {
-                            let sequence = unsafe {
-                                windows::Win32::System::DataExchange::GetClipboardSequenceNumber()
-                            };
-                            if state
-                                .trigger
-                                .try_send(Trigger::Paste {
-                                    sequence,
-                                    window: foreground,
-                                })
-                                .is_err()
-                            {
-                                state.finish();
-                            }
-                        }
-                        return LRESULT(1);
-                    }
-                }
-            }
-        }
-    }
-    unsafe { CallNextHookEx(None, code, wparam, lparam) }
-}
 unsafe extern "system" fn popup_proc(window: HWND, message: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     use windows::Win32::Graphics::Gdi::*;
     unsafe {

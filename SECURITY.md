@@ -14,6 +14,8 @@ Do not publish working exploit details or private connection data in a public is
 - Clipboard access without a paste action or outside the registered pane.
 - Path traversal, symlink handling, overwrite, and cleanup boundaries.
 - Protocol framing, resource exhaustion, malformed inputs, and cancellation races.
-- Host-key verification, authentication handling, helper installation, and future local IPC.
+- Host-key verification, authentication handling, helper installation, and local IPC.
 
 Clippy uses native OpenSSH for authentication and encryption. It does not store SSH passwords or private keys. Uploaded files and local path receipts persist by design; see the [README](README.md#files-and-retention).
+
+Pasting after sudo/su uses only existing noninteractive sudo permission. A short-lived helper drops its supplementary groups, GID, and UID to the foreground account before handling upload frames, then writes into that account's private upload tree. It does not edit sudoers, cache passwords, or broaden permissions on the original user's directories. Destination PID/start-time/UID chains are rechecked before path insertion. Restricted sudo policies, inaccessible process metadata, and ambiguous monitor chains fail without choosing another user.

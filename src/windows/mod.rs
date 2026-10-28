@@ -1,7 +1,11 @@
+pub mod automatic;
+pub mod background;
 pub mod bridge;
 pub mod client;
 pub mod clipboard;
 pub mod console;
+pub mod install;
+pub mod ipc;
 
 pub fn doctor() -> anyhow::Result<()> {
     println!("Clippy {}", env!("CARGO_PKG_VERSION"));
@@ -23,8 +27,16 @@ pub fn doctor() -> anyhow::Result<()> {
         clipboard::has_rich_content()
     );
     println!("Helper version required: {}", env!("CARGO_PKG_VERSION"));
-    bridge::check_hook_support()?;
+    background::check_hook_support()?;
     println!("Windows keyboard-hook support: available");
-    println!("Run clippy setup [SSH OPTIONS] HOST once, then clippy ssh [SSH OPTIONS] HOST.");
+    match background::control(ipc::Action::Status) {
+        Ok(ipc::Response::Status {
+            pid,
+            paused,
+            sessions,
+        }) => println!("Background: PID {pid}, paused={paused}, sessions={sessions}"),
+        _ => println!("Background: not running for this installation"),
+    }
+    println!("Run clippy install once, then use ssh in a new PowerShell tab in Windows Terminal.");
     Ok(())
 }

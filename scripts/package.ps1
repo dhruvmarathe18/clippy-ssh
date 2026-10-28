@@ -13,9 +13,10 @@ foreach ($clippyArch in @('x86_64', 'aarch64')) {
     if ($LASTEXITCODE -ne 0) { throw "Agent build failed: $clippyTarget" }
     Copy-Item -LiteralPath "target\$clippyTarget\release\clippy-agent" -Destination "dist\agents\clippy-agent-linux-$clippyArch"
 }
-cargo build --locked --release --bin clippy
+cargo build --locked --release --bin clippy --bin clippy-background
 if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
 Copy-Item -LiteralPath target\release\clippy.exe -Destination dist\package\clippy.exe
+Copy-Item -LiteralPath target\release\clippy-background.exe -Destination dist\package\clippy-background.exe
 Copy-Item -LiteralPath README.md,LICENSE,CONTRIBUTING.md,SECURITY.md -Destination dist\package
 Copy-Item -LiteralPath docs\validation.md,docs\roadmap.md,docs\architecture.md -Destination dist\package\docs
 Compress-Archive -Path dist\package\* -DestinationPath dist\clippy-windows-x64.zip -Force

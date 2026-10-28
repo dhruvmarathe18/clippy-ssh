@@ -10,7 +10,7 @@ fn run() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
         println!(
-            "Clippy {} — clipboard files and images over SSH\n\n  clippy setup [--agent PATH] [SSH OPTIONS] HOST\n  clippy ssh [SSH OPTIONS] HOST\n  clippy clean --older-than 30d [SSH OPTIONS] HOST\n  clippy doctor\n  clippy last\n\nPaste text normally. Ctrl+V / Ctrl+Shift+V upload files or images and insert remote paths.\nNo success popup or automatic Enter. Supports Linux and tmux; jump hosts use -J or SSH configuration.",
+            "Clippy {} — clipboard files and images over SSH\n\n  clippy install                    Enable normal ssh in PowerShell and start at sign-in\n  clippy uninstall                  Remove shell and startup integration\n  clippy background start|status|pause|resume|stop|check\n  clippy setup [--agent PATH] [SSH OPTIONS] HOST\n  clippy ssh [SSH OPTIONS] HOST\n  clippy clean --older-than 30d [SSH OPTIONS] HOST\n  clippy doctor\n  clippy last\n\nAfter install, open a new PowerShell tab in Windows Terminal and use ssh normally.\nUse ssh.exe or CLIPPY_DISABLE to bypass. Text paste stays native.\nCtrl+V / Ctrl+Shift+V upload files/images and insert paths, without a success popup or Enter.",
             env!("CARGO_PKG_VERSION")
         );
         return Ok(());
@@ -31,6 +31,20 @@ fn run() -> Result<()> {
         }
         #[cfg(windows)]
         "ssh" => clippy_ssh::windows::client::connect(Connection::parse(&args)?)?,
+        #[cfg(windows)]
+        "ssh-auto" => clippy_ssh::windows::automatic::run(&args)?,
+        #[cfg(windows)]
+        "background" => clippy_ssh::windows::background::command(&args)?,
+        #[cfg(windows)]
+        "install" => {
+            anyhow::ensure!(args.is_empty(), "usage: clippy install");
+            clippy_ssh::windows::install::install()?;
+        }
+        #[cfg(windows)]
+        "uninstall" => {
+            anyhow::ensure!(args.is_empty(), "usage: clippy uninstall");
+            clippy_ssh::windows::install::uninstall()?;
+        }
         #[cfg(windows)]
         "doctor" => clippy_ssh::windows::doctor()?,
         #[cfg(windows)]

@@ -1,5 +1,6 @@
 #[cfg(unix)]
 pub mod agent;
+pub mod integration;
 pub mod protocol;
 pub mod ssh;
 pub mod terminal;
