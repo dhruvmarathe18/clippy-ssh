@@ -47,6 +47,9 @@ jobs:
           $version = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages | Where-Object name -eq clippy-ssh).version
           ./scripts/test-installer.ps1 -Installer "dist/Clippy-Setup-$version-x64.exe"
       - name: Publish verified prerelease
+        # The uninstall test restores Undefined policy on the disposable runner.
+        # Use a process-only CI policy to run this final script, without profiles.
+        shell: pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File {0}
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
