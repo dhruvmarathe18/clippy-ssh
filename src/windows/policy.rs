@@ -27,6 +27,10 @@ fn run(shell: &PathBuf, script: &str) -> Result<String> {
             script,
         ])
         .env_remove("PSExecutionPolicyPreference")
+        // A parent PowerShell 7 process exports its module paths. Windows
+        // PowerShell must rebuild its own paths instead of loading .NET Core
+        // versions of Microsoft.PowerShell.Security/Utility into .NET Framework.
+        .env_remove("PSModulePath")
         .creation_flags(CREATE_NO_WINDOW.0)
         .output()
         .context("inspect PowerShell profile policy")?;
